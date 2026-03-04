@@ -57,6 +57,21 @@ function Addon:CreateThreatGlow(frame)
 end
 
 ----------------------------------------------------------------------
+-- Safe comparison helpers for secret values (WoW 12.0+)
+----------------------------------------------------------------------
+local function SafeEQ(val, n)
+    if val == nil then return false end
+    local ok, result = pcall(function() return val == n end)
+    return ok and result
+end
+
+local function SafeGTE(val, n)
+    if val == nil then return false end
+    local ok, result = pcall(function() return val >= n end)
+    return ok and result
+end
+
+----------------------------------------------------------------------
 -- Update Threat (Plater pattern: UnitDetailedThreatSituation)
 ----------------------------------------------------------------------
 function Addon:UpdateThreat(frame, unitId)
@@ -69,22 +84,23 @@ function Addon:UpdateThreat(frame, unitId)
     end
 
     -- Use UnitDetailedThreatSituation like Plater
+    -- All returned values are secret in WoW 12.0 - use pcall for comparisons
     local isTanking, threatStatus, threatpct, threatrawpct, threatValue = UnitDetailedThreatSituation("player", unitId)
 
     -- Determine role
     local isTank = self:IsPlayerTank()
     local colorTable = isTank and db.threat.tank or db.threat.dps
 
-    -- Map threat status to color
+    -- Map threat status to color (all comparisons via pcall)
     local color, showGlow
     if isTank then
-        if threatStatus == 3 then
+        if SafeEQ(threatStatus, 3) then
             color = colorTable.safe
             showGlow = false
-        elseif threatStatus == 2 then
+        elseif SafeEQ(threatStatus, 2) then
             color = colorTable.medium
             showGlow = true
-        elseif threatStatus == 1 then
+        elseif SafeEQ(threatStatus, 1) then
             color = colorTable.high
             showGlow = true
         else
@@ -92,13 +108,13 @@ function Addon:UpdateThreat(frame, unitId)
             showGlow = (threatStatus ~= nil)
         end
     else
-        if threatStatus == nil or threatStatus == 0 then
+        if threatStatus == nil or SafeEQ(threatStatus, 0) then
             color = colorTable.safe
             showGlow = false
-        elseif threatStatus == 1 then
+        elseif SafeEQ(threatStatus, 1) then
             color = colorTable.medium
             showGlow = true
-        elseif threatStatus == 2 then
+        elseif SafeEQ(threatStatus, 2) then
             color = colorTable.high
             showGlow = true
         else
@@ -112,7 +128,7 @@ function Addon:UpdateThreat(frame, unitId)
     end
 
     -- Apply health bar color override
-    if db.threat.useColorChange and threatStatus and threatStatus >= 1 then
+    if db.threat.useColorChange and threatStatus ~= nil and SafeGTE(threatStatus, 1) then
         frame.healthbar:SetStatusBarColor(color.r, color.g, color.b, 1)
     end
 

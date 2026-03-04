@@ -240,13 +240,22 @@ function Addon:SetAuraIcon(iconFrame, aura, db, unitId)
     end
 
     -- Stack count — only show if stacks > 1
-    -- In 12.0, applications may be secret, so use pcall for the > 1 check
+    -- In 12.0, applications is a secret value. Lua cannot coerce it to string
+    -- (so SetText(secret) silently shows nothing). SetFormattedText does the
+    -- format in C-space and handles secret values correctly.
     if db.auras.showStacks and aura.stacks then
-        local showStacks = false
-        local ok, result = pcall(function() return aura.stacks > 1 end)
-        if ok then showStacks = result end
+        local ok, gt1 = pcall(function() return aura.stacks > 1 end)
+        local showStacks = (not ok) or gt1  -- secret = show; known >1 = show; known <=1 = hide
         if showStacks then
-            iconFrame.stacks:SetText(string.format("%d", aura.stacks))
+            -- string.format works for plain numbers; SetFormattedText works for secrets
+            local textOk = pcall(function()
+                iconFrame.stacks:SetText(string.format("%d", aura.stacks))
+            end)
+            if not textOk then
+                pcall(function()
+                    iconFrame.stacks:SetFormattedText("%d", aura.stacks)
+                end)
+            end
             iconFrame.stacks:Show()
         else
             iconFrame.stacks:Hide()

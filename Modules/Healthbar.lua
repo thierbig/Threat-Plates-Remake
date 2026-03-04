@@ -77,7 +77,7 @@ function Addon:CreateHealthBar(frame)
 
     -- Status bar fill texture (resolve LSM key to path)
     bar:SetStatusBarTexture(ResolveTexture(db.healthbar.texture))
-    bar:SetStatusBarColor(1, 0, 0, 1)
+    bar:SetStatusBarColor(1, 1, 1, 1)  -- neutral white; ConfigureFrame sets the real color
 
     -- Keep reference to the fill texture for spark anchoring
     bar.barTexture = bar:GetStatusBarTexture()

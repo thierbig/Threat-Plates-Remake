@@ -16,6 +16,7 @@ local DEFAULTS = {
         general = {
             nameplateRange = 60,
             friendlyPlates = false,
+            hideEnemyPets = false,
             showInCombatOnly = false,
             clickThrough = false,
         },
@@ -44,6 +45,7 @@ local DEFAULTS = {
 
             -- Coloring
             classColor = true,
+            pvpClassColors = true,
             reactionColor = true,
             customFriendly = { r = 0, g = 0.8, b = 0 },
             customNeutral = { r = 1, g = 1, b = 0 },
@@ -224,6 +226,18 @@ local DEFAULTS = {
                 castbar     = { x = 0, y = -12 },
                 comboPoints = { x = 0, y = -26 },
             },
+        },
+
+        -------------------------------------------------
+        -- PvP Cooldown Tracker
+        -------------------------------------------------
+        pvpCooldowns = {
+            enabled = false,
+            showOffensive = true,
+            showDefensive = true,
+            iconSize = 18,
+            fontSize = 7,
+            yOffset = -28,
         },
 
         -------------------------------------------------

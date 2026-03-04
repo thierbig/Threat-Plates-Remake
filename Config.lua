@@ -372,6 +372,28 @@ local function GetOptions()
                             Addon:ApplyCVars()
                         end,
                     },
+                    friendlyPlates = {
+                        name = "Show Friendly Nameplates",
+                        desc = "Show nameplates on friendly players and NPCs.",
+                        type = "toggle",
+                        order = 2,
+                        get = function() return db.general.friendlyPlates end,
+                        set = function(_, val)
+                            db.general.friendlyPlates = val
+                            Addon:ApplyCVars()
+                        end,
+                    },
+                    hideEnemyPets = {
+                        name = "Hide Enemy Pet Nameplates",
+                        desc = "Hide nameplates on enemy player pets (Hunter pets, Warlock demons, DK ghouls, etc.).",
+                        type = "toggle",
+                        order = 3,
+                        get = function() return db.general.hideEnemyPets end,
+                        set = function(_, val)
+                            db.general.hideEnemyPets = val
+                            Addon:RefreshAllPlates()
+                        end,
+                    },
                     -- Note: Stacking mode and overlap CVars were removed in Midnight (12.0)
                 },
             },
@@ -499,12 +521,23 @@ local function GetOptions()
                     },
                     classColor = {
                         name = "Use Class Colors (Players)",
-                        desc = "Color health bars by class for player nameplates.",
+                        desc = "Color health bars by class for friendly player nameplates.",
                         type = "toggle",
                         order = 11,
                         get = function() return db.healthbar.classColor end,
                         set = function(_, val)
                             db.healthbar.classColor = val
+                            Addon:RefreshAllPlates()
+                        end,
+                    },
+                    pvpClassColors = {
+                        name = "Class Colors for Enemy Players",
+                        desc = "Color health bars by class for enemy players in battlegrounds and on training dummies.",
+                        type = "toggle",
+                        order = 12,
+                        get = function() return db.healthbar.pvpClassColors end,
+                        set = function(_, val)
+                            db.healthbar.pvpClassColors = val
                             Addon:RefreshAllPlates()
                         end,
                     },
@@ -1635,6 +1668,93 @@ local function GetOptions()
                                 comboPoints = { x = 0, y = -26 },
                             }
                             db.layout[layoutEditState] = defaults
+                            Addon:RefreshAllPlates()
+                        end,
+                    },
+                },
+            },
+
+            --------------------------------------------------------
+            -- PVP COOLDOWNS TAB
+            --------------------------------------------------------
+            pvpCooldowns = {
+                name = "PvP Cooldowns",
+                type = "group",
+                order = 10,
+                args = {
+                    desc = {
+                        name = "Track offensive and defensive cooldown usage by enemy players. Icons appear below the nameplate showing remaining cooldown time.\n|cffff4444Red bar|r = offensive  |cff4488ffBlue bar|r = defensive",
+                        type = "description",
+                        order = 0,
+                        fontSize = "medium",
+                    },
+                    enabled = {
+                        name = "Enable PvP Cooldown Tracking",
+                        desc = "Show cooldown icons on enemy player nameplates when they use a major cooldown.",
+                        type = "toggle",
+                        order = 1,
+                        width = "full",
+                        get = function() return db.pvpCooldowns.enabled end,
+                        set = function(_, val)
+                            db.pvpCooldowns.enabled = val
+                            Addon:RefreshAllPlates()
+                        end,
+                    },
+                    typeHeader = { name = "Cooldown Types", type = "header", order = 2 },
+                    showOffensive = {
+                        name = "Show Offensive Cooldowns",
+                        desc = "Track major damage/burst cooldowns (Recklessness, Combustion, Avenging Wrath, etc.).",
+                        type = "toggle",
+                        order = 3,
+                        get = function() return db.pvpCooldowns.showOffensive end,
+                        set = function(_, val)
+                            db.pvpCooldowns.showOffensive = val
+                            Addon:RefreshAllPlates()
+                        end,
+                    },
+                    showDefensive = {
+                        name = "Show Defensive Cooldowns",
+                        desc = "Track major survival cooldowns (Ice Block, Divine Shield, Cloak of Shadows, etc.).",
+                        type = "toggle",
+                        order = 4,
+                        get = function() return db.pvpCooldowns.showDefensive end,
+                        set = function(_, val)
+                            db.pvpCooldowns.showDefensive = val
+                            Addon:RefreshAllPlates()
+                        end,
+                    },
+                    appearanceHeader = { name = "Appearance", type = "header", order = 5 },
+                    iconSize = {
+                        name = "Icon Size",
+                        type = "range",
+                        min = 10, max = 30, step = 1,
+                        order = 6,
+                        get = function() return db.pvpCooldowns.iconSize end,
+                        set = function(_, val)
+                            db.pvpCooldowns.iconSize = val
+                            Addon:RefreshAllPlates()
+                        end,
+                    },
+                    fontSize = {
+                        name = "Timer Font Size",
+                        type = "range",
+                        min = 5, max = 12, step = 1,
+                        order = 7,
+                        get = function() return db.pvpCooldowns.fontSize end,
+                        set = function(_, val)
+                            db.pvpCooldowns.fontSize = val
+                            Addon:RefreshAllPlates()
+                        end,
+                    },
+                    yOffset = {
+                        name = "Vertical Position",
+                        desc = "Vertical offset from the nameplate center. Negative moves downward.",
+                        type = "range",
+                        min = -80, max = 80, step = 1,
+                        order = 8,
+                        get = function() return db.pvpCooldowns.yOffset end,
+                        set = function(_, val)
+                            db.pvpCooldowns.yOffset = val
                             Addon:RefreshAllPlates()
                         end,
                     },

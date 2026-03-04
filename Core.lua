@@ -53,6 +53,9 @@ function Addon:OnEnable()
     self:RegisterEvent("UNIT_HEALTH", "OnUnitHealth")
     self:RegisterEvent("UNIT_AURA", "OnUnitAura")
     self:RegisterEvent("UNIT_THREAT_LIST_UPDATE", "OnThreatUpdate")
+    self:RegisterEvent("UNIT_NAME_UPDATE", "OnUnitNameUpdate")
+    self:RegisterEvent("UNIT_FACTION", "OnUnitFaction")
+    self:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED", "OnSpellSucceeded")
     self:RegisterEvent("UNIT_SPELLCAST_START", "OnCastStart")
     self:RegisterEvent("UNIT_SPELLCAST_STOP", "OnCastStop")
     self:RegisterEvent("UNIT_SPELLCAST_CHANNEL_START", "OnChannelStart")
@@ -66,6 +69,13 @@ function Addon:OnEnable()
 
     -- Apply CVars for nameplate behavior
     self:ApplyCVars()
+
+    -- Periodic cast bar validation: clear bars whose unit stopped casting without
+    -- firing a CHANNEL_STOP / CAST_STOP event (dies mid-channel, leaves range, etc.)
+    self:ScheduleRepeatingTimer("ValidateCastBars", 0.5)
+
+    -- Periodic CD timer refresh (updates countdown text on pvp cooldown icons)
+    self:ScheduleRepeatingTimer("UpdateAllCooldownTimers", 1.0)
 
     -- Process any existing nameplates (reload scenario)
     for _, plate in ipairs(C_NamePlate.GetNamePlates()) do
@@ -96,8 +106,26 @@ function Addon:ApplyCVars()
     if InCombatLockdown() then return end
 
     local db = self.db.profile
+    local friendly = db.general.friendlyPlates and 1 or 0
     pcall(C_CVar.SetCVar, "nameplateMaxDistance", db.general.nameplateRange or 60)
     pcall(C_CVar.SetCVar, "nameplateShowEnemies", 1)
+    pcall(C_CVar.SetCVar, "nameplateShowFriendlyNPCs", friendly)
+
+    -- Friendly PLAYER nameplates: CVar was renamed/split across versions.
+    -- Try all known names — pcall silently skips ones that don't exist.
+    pcall(C_CVar.SetCVar, "nameplateShowFriends", friendly)
+    pcall(C_CVar.SetCVar, "nameplateShowFriendlyPlayers", friendly)
+
+    -- WoW 12.0: C_NamePlateManager may have replaced CVars for friendly players.
+    if C_NamePlateManager then
+        if C_NamePlateManager.SetShowFriendlyPlayerNameplates then
+            pcall(C_NamePlateManager.SetShowFriendlyPlayerNameplates, friendly == 1)
+        end
+        -- Some 12.0 builds expose a unified friendly toggle
+        if C_NamePlateManager.SetShowFriendlyNameplates then
+            pcall(C_NamePlateManager.SetShowFriendlyNameplates, friendly == 1)
+        end
+    end
 end
 
 ----------------------------------------------------------------------
@@ -108,8 +136,6 @@ function Addon:SlashCommand(input)
         self.db:ResetProfile()
         self:Print("Profile reset to defaults.")
     else
-        Settings.OpenToCategory(ADDON_NAME)
-        -- Fallback: open AceConfig dialog
         LibStub("AceConfigDialog-3.0"):Open(ADDON_NAME)
     end
 end
@@ -126,9 +152,20 @@ function Addon:OnNamePlateCreated(_, plate)
     self:HookBlizzardFrame(plate)
 end
 
-function Addon:OnNamePlateUnitAdded(_, unitId)
+function Addon:OnNamePlateUnitAdded(_, unitId, _isRetry)
     local plate = GetNamePlateForUnit(unitId)
-    if not plate then return end
+    if not plate then
+        -- Plate frame may not be registered on the same tick (faction change, spawn after interaction).
+        -- Schedule a single retry on the next frame.
+        if not _isRetry then
+            self:ScheduleTimer(function()
+                if UnitExists(unitId) then
+                    self:OnNamePlateUnitAdded(nil, unitId, true)
+                end
+            end, 0.05)
+        end
+        return
+    end
 
     TPR.NameplatesByUnit[unitId] = plate
 
@@ -139,6 +176,16 @@ function Addon:OnNamePlateUnitAdded(_, unitId)
     end
 
     if customFrame then
+        -- Hide enemy pet nameplates entirely if option is enabled
+        local db = self.db.profile
+        if db.general.hideEnemyPets then
+            local isPet = UnitIsOtherPlayersPet and UnitIsOtherPlayersPet(unitId)
+            if isPet then
+                self:HideBlizzardFrame(plate) -- suppress Blizzard frame too
+                return
+            end
+        end
+
         customFrame.unitId = unitId
         self:ConfigureFrame(customFrame, unitId)
         customFrame:Show()
@@ -153,10 +200,13 @@ function Addon:OnNamePlateUnitRemoved(_, unitId)
     if plate then
         local customFrame = TPR.ActivePlates[plate]
         if customFrame then
+            -- Clear cast state before hiding — frame may be recycled for another unit
+            self:StopCastForFrame(customFrame)
             customFrame:Hide()
             customFrame.unitId = nil
         end
         TPR.NameplatesByUnit[unitId] = nil
+        self:ClearUnitCooldowns(unitId)
     end
 
     -- Restore Blizzard frame visibility
@@ -191,6 +241,7 @@ function Addon:CreateCustomFrame(plate)
     self:CreateTargetHighlight(f)
     self:CreateComboPoints(f)
     self:CreateQuestIcon(f)
+    self:CreateCooldownFrame(f)
 
     -- Name text (UnitName returns secret for NPCs in 12.0, but SetText accepts secrets)
     local nt = db.healthbar.nameText or {}
@@ -222,6 +273,9 @@ end
 ----------------------------------------------------------------------
 function Addon:ConfigureFrame(frame, unitId)
     if not UnitExists(unitId) then return end
+
+    -- Always clear stale cast state when (re)assigning a unit to a frame
+    self:StopCastForFrame(frame)
 
     local db = self.db.profile
 
@@ -268,43 +322,60 @@ function Addon:ConfigureFrame(frame, unitId)
 
     -- Color the health bar (class colors for players, reaction colors for NPCs)
     local isPlayer = UnitIsPlayer(unitId)
-    if isPlayer and db.healthbar.classColor then
+    local isEnemy = UnitCanAttack("player", unitId)  -- true for BG enemies, training dummies, etc.
+    local wantClassColor = isPlayer and (isEnemy and db.healthbar.pvpClassColors or (not isEnemy and db.healthbar.classColor))
+    local classColorApplied = false
+    if wantClassColor then
         local _, class = UnitClass(unitId)
         if class then
-            local color = RAID_CLASS_COLORS[class]
-            if color then
-                frame.healthbar:SetStatusBarColor(color.r, color.g, color.b, 1)
+            -- For enemy players in BGs (12.0), the class token is a secret value.
+            -- RAID_CLASS_COLORS[secretToken] returns nil (can't index with a secret).
+            -- GetClassColor() is a C function that accepts secret tokens directly.
+            local r, g, b
+            local directColor = RAID_CLASS_COLORS[class]
+            if directColor then
+                r, g, b = directColor.r, directColor.g, directColor.b
+            elseif GetClassColor then
+                local ok, cm = pcall(GetClassColor, class)
+                if ok and cm then r, g, b = cm.r, cm.g, cm.b end
             end
-        end
-    elseif db.healthbar.reactionColor then
-        -- Use UnitSelectionColor like Plater (returns proper reaction colors)
-        if UnitSelectionColor then
-            local r, g, b = UnitSelectionColor(unitId)
             if r then
                 frame.healthbar:SetStatusBarColor(r, g, b, 1)
-            end
-        else
-            local reaction = UnitReaction(unitId, "player") or 4
-            if reaction >= 5 then
-                frame.healthbar:SetStatusBarColor(0, 0.8, 0, 1)
-            elseif reaction == 4 then
-                frame.healthbar:SetStatusBarColor(1, 1, 0, 1)
-            else
-                frame.healthbar:SetStatusBarColor(1, 0, 0, 1)
+                classColorApplied = true
             end
         end
-    else
-        -- Custom fixed colors from config
-        local reaction = UnitReaction(unitId, "player") or 4
-        if reaction >= 5 then
-            local c = db.healthbar.customFriendly
-            frame.healthbar:SetStatusBarColor(c.r, c.g, c.b, 1)
-        elseif reaction == 4 then
-            local c = db.healthbar.customNeutral
-            frame.healthbar:SetStatusBarColor(c.r, c.g, c.b, 1)
+    end
+    if not classColorApplied then
+        if db.healthbar.reactionColor then
+            -- Use UnitSelectionColor like Plater (returns proper reaction colors)
+            if UnitSelectionColor then
+                local r, g, b = UnitSelectionColor(unitId)
+                if r then
+                    frame.healthbar:SetStatusBarColor(r, g, b, 1)
+                end
+            else
+                local reaction = UnitReaction(unitId, "player") or 4
+                if reaction >= 5 then
+                    frame.healthbar:SetStatusBarColor(0, 0.8, 0, 1)
+                elseif reaction == 4 then
+                    frame.healthbar:SetStatusBarColor(1, 1, 0, 1)
+                else
+                    frame.healthbar:SetStatusBarColor(1, 0, 0, 1)
+                end
+            end
         else
-            local c = db.healthbar.customHostile
-            frame.healthbar:SetStatusBarColor(c.r, c.g, c.b, 1)
+            -- Custom fixed colors from config
+            local reaction = UnitReaction(unitId, "player") or 4
+            if reaction >= 5 then
+                local c = db.healthbar.customFriendly
+                frame.healthbar:SetStatusBarColor(c.r, c.g, c.b, 1)
+            elseif reaction == 4 then
+                local c = db.healthbar.customNeutral
+                frame.healthbar:SetStatusBarColor(c.r, c.g, c.b, 1)
+            else
+                local c = db.healthbar.customHostile
+                frame.healthbar:SetStatusBarColor(c.r, c.g, c.b, 1)
+            end
         end
     end
 
@@ -338,6 +409,9 @@ function Addon:ConfigureFrame(frame, unitId)
     -- Quest icon
     self:UpdateQuestIcon(frame, unitId)
 
+    -- PvP cooldown tracker
+    self:UpdateCooldowns(frame, unitId)
+
     -- Auto-stack layout so elements don't overlap
     self:LayoutElements(frame)
 end
@@ -365,9 +439,11 @@ function Addon:LayoutElements(frame)
     frame.healthbarBg:ClearAllPoints()
     frame.healthbarBg:SetPoint("CENTER", anchor, "CENTER", hb.x, hb.y)
 
-    -- Name text
+    -- Name text — always pre-position, even when hidden.
+    -- If we skip this when hidden, a late UnitName arrival can show the text
+    -- at position 0,0 (same as the health bar) before LayoutElements re-runs.
     local nt = db.healthbar.nameText or {}
-    if nt.show ~= false and frame.name and frame.name:IsShown() then
+    if frame.name then
         local nt_l = L.nameText or { x = 0, y = 12 }
         frame.name:ClearAllPoints()
         frame.name:SetPoint("CENTER", anchor, "CENTER", nt_l.x, nt_l.y)
@@ -401,6 +477,14 @@ function Addon:LayoutElements(frame)
         frame.comboPoints:SetPoint("CENTER", anchor, "CENTER", cp_l.x, cp_l.y)
     end
 
+    -- PvP cooldown icons (below health bar)
+    if frame.cdFrame and frame.cdFrame:IsShown() then
+        local db = self.db.profile
+        local yOff = db.pvpCooldowns and db.pvpCooldowns.yOffset or -28
+        frame.cdFrame:ClearAllPoints()
+        frame.cdFrame:SetPoint("CENTER", anchor, "CENTER", 0, yOff)
+    end
+
 end
 
 ----------------------------------------------------------------------
@@ -432,6 +516,40 @@ function Addon:OnUnitHealth(_, unitId)
     local frame = TPR.ActivePlates[plate]
     if frame and frame.unitId == unitId then
         self:UpdateHealth(frame, unitId)
+    end
+end
+
+function Addon:OnUnitNameUpdate(_, unitId)
+    -- Fires when a unit's name becomes available (late for freshly-spawned NPCs)
+    local plate = TPR.NameplatesByUnit[unitId]
+    if not plate then return end
+    local frame = TPR.ActivePlates[plate]
+    if not frame or frame.unitId ~= unitId then return end
+
+    local db = self.db.profile
+    local nt = db.healthbar.nameText or {}
+    local name = UnitName(unitId)
+    if nt.show ~= false and name then
+        frame.name:SetText(name)
+        frame.name:Show()
+        self:LayoutElements(frame)
+    end
+end
+
+function Addon:OnUnitFaction(_, unitId)
+    -- Fires when a unit's faction/reaction changes (e.g. Apothecary Hummel becoming hostile)
+    if not unitId then return end
+    local plate = TPR.NameplatesByUnit[unitId]
+    if plate then
+        -- Unit already tracked — re-configure with new reaction color etc.
+        local frame = TPR.ActivePlates[plate]
+        if frame and frame.unitId == unitId then
+            self:ConfigureFrame(frame, unitId)
+        end
+    else
+        -- Not yet tracked — the nameplate might exist but we missed UNIT_ADDED
+        -- (can happen when a unit goes from a no-nameplate state to having one)
+        self:OnNamePlateUnitAdded(nil, unitId)
     end
 end
 

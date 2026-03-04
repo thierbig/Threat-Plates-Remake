@@ -226,6 +226,8 @@ function Addon:UpdateCastingInfo(unitId)
     if not plate then return end
     local frame = TPR.ActivePlates[plate]
     if not frame or not frame.castbar then return end
+    -- Guard against recycled frames: ensure this frame still belongs to this unit
+    if frame.unitId ~= unitId then return end
 
     local db = self.db.profile
     if not db.castbar.enabled then return end
@@ -281,6 +283,7 @@ function Addon:UpdateChannelInfo(unitId)
     if not plate then return end
     local frame = TPR.ActivePlates[plate]
     if not frame or not frame.castbar then return end
+    if frame.unitId ~= unitId then return end
 
     local db = self.db.profile
     if not db.castbar.enabled then return end
@@ -411,6 +414,33 @@ function Addon:StopCastForFrame(frame)
         frame.castbarBg:Hide()
     end
     self:LayoutElements(frame)
+end
+
+----------------------------------------------------------------------
+-- Periodic Cast Bar Validation
+-- Called every 0.5s. Clears bars whose unit stopped casting without firing
+-- a CHANNEL_STOP / CAST_STOP event (dies mid-channel, leaves range, etc.).
+-- UnitChannelInfo / UnitCastingInfo return nil when not casting, which is
+-- falsy. Secret values (unit IS casting) are truthy — "if not name" is a
+-- safe truthiness check; it does NOT compare secrets, just tests nil/false.
+----------------------------------------------------------------------
+function Addon:ValidateCastBars()
+    for plate, frame in pairs(TPR.ActivePlates) do
+        if frame.unitId and frame.castbar then
+            local bar = frame.castbar
+            if bar.channeling then
+                local name = UnitChannelInfo(frame.unitId)
+                if not name then
+                    self:StopCastForFrame(frame)
+                end
+            elseif bar.casting then
+                local name = UnitCastingInfo(frame.unitId)
+                if not name then
+                    self:StopCastForFrame(frame)
+                end
+            end
+        end
+    end
 end
 
 ----------------------------------------------------------------------
