@@ -57,10 +57,24 @@ end
 ----------------------------------------------------------------------
 local trackedButtons = setmetatable({}, { __mode = "k" })
 
+-- SetFont fails (returns false) on an invalid font path and can leave the
+-- font string font-less — and the engine SetText()s into registered regions,
+-- which errors on a font-less FontString. Always land on a valid font.
+local function SafeSetFont(fs, path, size, flags)
+    if not fs:SetFont(path, size, flags) then
+        fs:SetFont([[Fonts\FRIZQT__.TTF]], size, flags)
+    end
+end
+
 local function StyleAuraButton(btn)
     local db = Addon.db.profile.auras
+    local fontPath = TPR.ResolveFont(db.font)
 
     if not btn.tprIcon then
+        -- Create and FULLY initialize each region before registering it:
+        -- the engine writes into a region synchronously during the Set*
+        -- registration call, so e.g. a font string registered without a
+        -- font errors with "SetText(): Font not set".
         btn.tprBorder = btn:CreateTexture(nil, "BACKGROUND")
         btn.tprBorder:SetPoint("TOPLEFT", btn, "TOPLEFT", -1, 1)
         btn.tprBorder:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", 1, -1)
@@ -68,7 +82,6 @@ local function StyleAuraButton(btn)
         btn.tprIcon = btn:CreateTexture(nil, "ARTWORK")
         btn.tprIcon:SetAllPoints(btn)
         btn.tprIcon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
-        btn:SetIcon(btn.tprIcon)
 
         -- Cooldown swipe; countdown numbers stay off — duration is shown
         -- through the engine-driven duration font string below.
@@ -76,16 +89,19 @@ local function StyleAuraButton(btn)
         btn.tprCooldown:SetAllPoints(btn)
         btn.tprCooldown:SetDrawEdge(false)
         btn.tprCooldown:SetHideCountdownNumbers(true)
-        btn:SetDurationCooldown(btn.tprCooldown)
 
         btn.tprDuration = btn:CreateFontString(nil, "OVERLAY")
         btn.tprDuration:SetPoint("TOPRIGHT", btn, "TOPRIGHT", 2, 2)
-        btn:SetDurationText(btn.tprDuration)
+        SafeSetFont(btn.tprDuration, fontPath, db.durationFontSize or 8, "OUTLINE")
 
         btn.tprStacks = btn:CreateFontString(nil, "OVERLAY")
         btn.tprStacks:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", 1, -1)
-        btn:SetApplicationCount(btn.tprStacks)
+        SafeSetFont(btn.tprStacks, fontPath, db.fontSize or 8, "OUTLINE")
 
+        btn:SetIcon(btn.tprIcon)
+        btn:SetDurationCooldown(btn.tprCooldown)
+        btn:SetDurationText(btn.tprDuration)
+        btn:SetApplicationCount(btn.tprStacks)
         btn:SetMouseMotionEnabled(false)
     end
 
@@ -97,13 +113,13 @@ local function StyleAuraButton(btn)
 
     btn.tprCooldown:SetDrawSwipe(db.showCooldownSpiral and true or false)
 
-    btn.tprDuration:SetFont(TPR.ResolveFont(db.font), db.durationFontSize or 8, "OUTLINE")
+    SafeSetFont(btn.tprDuration, fontPath, db.durationFontSize or 8, "OUTLINE")
     btn.tprDuration:SetTextColor(1, 1, 1, 1)
     -- The engine manages Show/Hide of registered regions; alpha implements
     -- the user toggles without fighting it.
     btn.tprDuration:SetAlpha(db.showDuration and 1 or 0)
 
-    btn.tprStacks:SetFont(TPR.ResolveFont(db.font), db.fontSize or 8, "OUTLINE")
+    SafeSetFont(btn.tprStacks, fontPath, db.fontSize or 8, "OUTLINE")
     btn.tprStacks:SetTextColor(1, 1, 1, 1)
     btn.tprStacks:SetAlpha(db.showStacks and 1 or 0)
 end
