@@ -161,8 +161,10 @@ function Addon:OnSpellSucceeded(_, unitId, castGUID, spellId)
     local db = self.db.profile
     if not db.pvpCooldowns.enabled then return end
 
-    -- Table key lookup with a secret spellId returns nil (no error).
-    -- If spellId is recognisable the lookup succeeds; otherwise we skip.
+    -- 12.1: indexing a table with a secret key raises an error (12.0
+    -- returned nil). A secret spellId can't be identified anyway — skip.
+    if not spellId or (issecretvalue and issecretvalue(spellId)) then return end
+
     local cdData = PVP_COOLDOWNS[spellId]
     if not cdData then return end
 

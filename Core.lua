@@ -327,20 +327,26 @@ function Addon:ConfigureFrame(frame, unitId)
     if wantClassColor then
         local _, class = UnitClass(unitId)
         if class then
-            -- For enemy players in BGs (12.0), the class token is a secret value.
-            -- RAID_CLASS_COLORS[secretToken] returns nil (can't index with a secret).
-            -- GetClassColor() is a C function that accepts secret tokens directly.
-            local r, g, b
-            local directColor = RAID_CLASS_COLORS[class]
-            if directColor then
-                r, g, b = directColor.r, directColor.g, directColor.b
-            elseif GetClassColor then
-                local ok, cm = pcall(GetClassColor, class)
-                if ok and cm then r, g, b = cm.r, cm.g, cm.b end
-            end
-            if r then
-                frame.healthbar:SetStatusBarColor(r, g, b, 1)
-                classColorApplied = true
+            -- 12.1: UnitClass returns a secret token for identity-hidden
+            -- players (arena/BG), and indexing a table with a secret key
+            -- now raises an error (12.0 returned nil). Route secret tokens
+            -- through C_ClassColor.GetClassColor, which is C-level and
+            -- accepts secrets; its ColorMixin fields (possibly secret) go
+            -- straight to the widget, which accepts them.
+            if issecretvalue and issecretvalue(class) then
+                if C_ClassColor and C_ClassColor.GetClassColor then
+                    local ok, cm = pcall(C_ClassColor.GetClassColor, class)
+                    if ok and cm then
+                        classColorApplied = pcall(frame.healthbar.SetStatusBarColor,
+                            frame.healthbar, cm.r, cm.g, cm.b, 1)
+                    end
+                end
+            else
+                local directColor = RAID_CLASS_COLORS[class]
+                if directColor then
+                    frame.healthbar:SetStatusBarColor(directColor.r, directColor.g, directColor.b, 1)
+                    classColorApplied = true
+                end
             end
         end
     end
