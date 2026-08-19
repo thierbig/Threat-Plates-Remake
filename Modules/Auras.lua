@@ -171,6 +171,9 @@ local function DesiredAuraGroups(db)
     return groups
 end
 
+-- Deterministic row order: debuffs left of buffs
+local GROUP_LAYOUT_INDEX = { debuffs = 1, buffs = 2 }
+
 function Addon:ConfigureAuraContainer(container)
     local db = self.db.profile.auras
     local desired = DesiredAuraGroups(db)
@@ -180,22 +183,34 @@ function Addon:ConfigureAuraContainer(container)
     container._groups = container._groups or {}
 
     for key, filterString in pairs(desired) do
+        -- Layout keys per Blizzard_CustomAuraContainer.lua (12.1.0).
+        -- elementWidth/Height feed the engine's spacing math so it always
+        -- matches the visual button size set in StyleAuraButton; the
+        -- container then auto-sizes to the row, and its CENTER anchor on
+        -- auraFrame keeps the row centered like the old manual layout.
+        local iconSize = db.iconSize or 20
+        local spacing = db.iconSpacing or 2
+        local layout = {
+            elementSpacing = spacing,
+            groupSpacing = spacing,
+            elementWidth = iconSize,
+            elementHeight = iconSize,
+            layoutIndex = GROUP_LAYOUT_INDEX[key],
+        }
         if container._groups[key] then
             container:SetAuraGroupFilterString(key, filterString)
             container:SetAuraGroupCandidateFilters(key, filters)
             container:SetAuraGroupMaxFrameCount(key, maxShow)
+            container:SetAuraGroupLayout(key, layout)
         else
             container:AddAuraGroup(key, filterString, {
                 maxFrameCount = maxShow,
                 candidateFilters = filters,
                 initializeFrame = InitializeAuraButton,
+                layout = layout,
             })
             container._groups[key] = true
         end
-        -- Best-effort: the layout table keys churned during the 12.1 PTR
-        pcall(container.SetAuraGroupLayout, container, key, {
-            elementSpacing = db.iconSpacing or 2,
-        })
     end
 
     -- Groups cannot be removed once added; zero frames is the off switch
