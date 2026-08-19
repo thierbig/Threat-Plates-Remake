@@ -8,7 +8,7 @@ local ADDON_NAME, TPR = ...
 -- Create Ace3 addon
 local Addon = LibStub("AceAddon-3.0"):NewAddon(ADDON_NAME, "AceEvent-3.0", "AceConsole-3.0", "AceTimer-3.0", "AceSerializer-3.0")
 TPR.Addon = Addon
-TPR.Version = "1.0.0"
+TPR.Version = "1.1.0"
 
 -- Shared namespace for modules
 TPR.ActivePlates = {} -- [nameplate] = our custom frame
@@ -70,6 +70,9 @@ function Addon:OnEnable()
     -- Apply CVars for nameplate behavior
     self:ApplyCVars()
 
+    -- 12.1: AuraContainers can't be created in combat — fill the pool now
+    self:PreallocateAuraContainers()
+
     -- Periodic cast bar validation: clear bars whose unit stopped casting without
     -- firing a CHANNEL_STOP / CAST_STOP event (dies mid-channel, leaves range, etc.)
     self:ScheduleRepeatingTimer("ValidateCastBars", 0.5)
@@ -111,21 +114,9 @@ function Addon:ApplyCVars()
     pcall(C_CVar.SetCVar, "nameplateShowEnemies", 1)
     pcall(C_CVar.SetCVar, "nameplateShowFriendlyNPCs", friendly)
 
-    -- Friendly PLAYER nameplates: CVar was renamed/split across versions.
-    -- Try all known names — pcall silently skips ones that don't exist.
-    pcall(C_CVar.SetCVar, "nameplateShowFriends", friendly)
+    -- Friendly PLAYER nameplates: "nameplateShowFriends" was removed in
+    -- 12.0.5; "nameplateShowFriendlyPlayers" is the live CVar since then.
     pcall(C_CVar.SetCVar, "nameplateShowFriendlyPlayers", friendly)
-
-    -- WoW 12.0: C_NamePlateManager may have replaced CVars for friendly players.
-    if C_NamePlateManager then
-        if C_NamePlateManager.SetShowFriendlyPlayerNameplates then
-            pcall(C_NamePlateManager.SetShowFriendlyPlayerNameplates, friendly == 1)
-        end
-        -- Some 12.0 builds expose a unified friendly toggle
-        if C_NamePlateManager.SetShowFriendlyNameplates then
-            pcall(C_NamePlateManager.SetShowFriendlyNameplates, friendly == 1)
-        end
-    end
 end
 
 ----------------------------------------------------------------------
@@ -202,6 +193,7 @@ function Addon:OnNamePlateUnitRemoved(_, unitId)
         if customFrame then
             -- Clear cast state before hiding — frame may be recycled for another unit
             self:StopCastForFrame(customFrame)
+            self:ResetAuraUnit(customFrame)
             customFrame:Hide()
             customFrame.unitId = nil
         end
@@ -593,6 +585,10 @@ function Addon:OnCombatEnd()
             self:UpdateThreat(frame, frame.unitId)
         end
     end
+
+    -- 12.1 auras: refill container pool, attach deferred containers,
+    -- apply config changes that were blocked during combat
+    self:OnAuraCombatEnd()
 end
 
 ----------------------------------------------------------------------
@@ -625,6 +621,7 @@ end
 function Addon:ReleaseCustomFrame(plate)
     local frame = TPR.ActivePlates[plate]
     if frame then
+        self:ResetAuraUnit(frame)
         frame:Hide()
         frame.unitId = nil
     end

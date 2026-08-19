@@ -438,6 +438,7 @@ end
 function Addon:RefreshAllPlates()
     self:MigrateProfile()
     self:ApplyCVars()
+    self:AuraConfigChanged()
     for plate, frame in pairs(TPR.ActivePlates) do
         if frame.unitId then
             self:ConfigureFrame(frame, frame.unitId)

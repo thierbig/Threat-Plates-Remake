@@ -1,12 +1,219 @@
 ----------------------------------------------------------------------
 -- ThreatPlates Remake - Auras Module
 -- Debuff & buff tracking on nameplates
--- Updated for WoW Midnight (12.0) Secret Values API
+-- 12.1+ (Midnight "Curse of Ula'tek"): uses the AuraContainer/AuraButton
+-- system. The index/slot/instanceID getters in C_UnitAuras now raise Lua
+-- errors while auras are secret (combat, dungeons, PvP), so the engine
+-- must own aura enumeration; the addon only styles the buttons.
+-- Pre-12.1 clients fall back to the old UNIT_AURA scanning path.
 ----------------------------------------------------------------------
 local ADDON_NAME, TPR = ...
 local Addon = TPR.Addon
 
 local MAX_AURA_ICONS = 10 -- hard cap for icon pool
+
+local HAS_AURA_CONTAINERS = C_XMLUtil and C_XMLUtil.GetTemplateInfo
+    and C_XMLUtil.GetTemplateInfo("CustomAuraContainerTemplate") and true or false
+TPR.HasAuraContainers = HAS_AURA_CONTAINERS
+
+local function AurasAreSecret()
+    return C_Secrets and C_Secrets.ShouldAurasBeSecret and C_Secrets.ShouldAurasBeSecret()
+end
+
+----------------------------------------------------------------------
+-- AuraContainer pool
+-- Containers cannot be created during combat, but nameplate frames can
+-- appear mid-combat, so a pool is filled while out of combat and drawn
+-- from when a plate needs one.
+----------------------------------------------------------------------
+local containerPool = {}
+local POOL_TARGET = 12
+
+local function CreatePooledContainer()
+    local c = CreateFrame("AuraContainer", nil, UIParent, "CustomAuraContainerTemplate")
+    c:Hide()
+    return c
+end
+
+function Addon:PreallocateAuraContainers()
+    if not HAS_AURA_CONTAINERS or InCombatLockdown() then return end
+    while #containerPool < POOL_TARGET do
+        containerPool[#containerPool + 1] = CreatePooledContainer()
+    end
+end
+
+local function AcquireAuraContainer()
+    local c = table.remove(containerPool)
+    if not c and not InCombatLockdown() then
+        c = CreatePooledContainer()
+    end
+    return c -- nil when in combat with an empty pool
+end
+
+----------------------------------------------------------------------
+-- AuraButton styling
+-- Buttons are created by the engine; the addon supplies child regions
+-- through the Set* registration APIs and the engine writes into them.
+----------------------------------------------------------------------
+local trackedButtons = setmetatable({}, { __mode = "k" })
+
+local function StyleAuraButton(btn)
+    local db = Addon.db.profile.auras
+
+    if not btn.tprIcon then
+        btn.tprBorder = btn:CreateTexture(nil, "BACKGROUND")
+        btn.tprBorder:SetPoint("TOPLEFT", btn, "TOPLEFT", -1, 1)
+        btn.tprBorder:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", 1, -1)
+
+        btn.tprIcon = btn:CreateTexture(nil, "ARTWORK")
+        btn.tprIcon:SetAllPoints(btn)
+        btn.tprIcon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+        btn:SetIcon(btn.tprIcon)
+
+        -- Cooldown swipe; countdown numbers stay off — duration is shown
+        -- through the engine-driven duration font string below.
+        btn.tprCooldown = CreateFrame("Cooldown", nil, btn, "CooldownFrameTemplate")
+        btn.tprCooldown:SetAllPoints(btn)
+        btn.tprCooldown:SetDrawEdge(false)
+        btn.tprCooldown:SetHideCountdownNumbers(true)
+        btn:SetDurationCooldown(btn.tprCooldown)
+
+        btn.tprDuration = btn:CreateFontString(nil, "OVERLAY")
+        btn.tprDuration:SetPoint("TOPRIGHT", btn, "TOPRIGHT", 2, 2)
+        btn:SetDurationText(btn.tprDuration)
+
+        btn.tprStacks = btn:CreateFontString(nil, "OVERLAY")
+        btn.tprStacks:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", 1, -1)
+        btn:SetApplicationCount(btn.tprStacks)
+
+        btn:SetMouseMotionEnabled(false)
+    end
+
+    local size = db.iconSize or 20
+    btn:SetSize(size, size)
+
+    local bc = db.borderColor or { r = 0, g = 0, b = 0, a = 1 }
+    btn.tprBorder:SetColorTexture(bc.r, bc.g, bc.b, bc.a)
+
+    btn.tprCooldown:SetDrawSwipe(db.showCooldownSpiral and true or false)
+
+    btn.tprDuration:SetFont(TPR.ResolveFont(db.font), db.durationFontSize or 8, "OUTLINE")
+    btn.tprDuration:SetTextColor(1, 1, 1, 1)
+    -- The engine manages Show/Hide of registered regions; alpha implements
+    -- the user toggles without fighting it.
+    btn.tprDuration:SetAlpha(db.showDuration and 1 or 0)
+
+    btn.tprStacks:SetFont(TPR.ResolveFont(db.font), db.fontSize or 8, "OUTLINE")
+    btn.tprStacks:SetTextColor(1, 1, 1, 1)
+    btn.tprStacks:SetAlpha(db.showStacks and 1 or 0)
+end
+
+local function InitializeAuraButton(btn)
+    trackedButtons[btn] = true
+    local ok, err = pcall(StyleAuraButton, btn)
+    if not ok then geterrorhandler()(err) end
+end
+
+function Addon:RestyleAuraButtons()
+    if InCombatLockdown() or AurasAreSecret() then return end
+    for btn in pairs(trackedButtons) do
+        local ok, err = pcall(StyleAuraButton, btn)
+        if not ok then geterrorhandler()(err) end
+    end
+end
+
+----------------------------------------------------------------------
+-- Container configuration (groups + filters from the profile)
+----------------------------------------------------------------------
+local auraConfigEpoch = 1
+
+local function SpellMapToArray(map)
+    local arr = {}
+    for spellId in pairs(map) do
+        -- Container candidate filters accept spell IDs only
+        if type(spellId) == "number" then
+            arr[#arr + 1] = spellId
+        end
+    end
+    return arr
+end
+
+local function BuildCandidateFilters(db)
+    if db.filterMode == "WHITELIST" and next(db.whitelist) ~= nil then
+        return { includeSpellIDs = SpellMapToArray(db.whitelist) }
+    elseif db.filterMode == "BLACKLIST" and next(db.blacklist) ~= nil then
+        return { excludeSpellIDs = SpellMapToArray(db.blacklist) }
+    end
+    return {}
+end
+
+local function DesiredAuraGroups(db)
+    local suffix = db.onlyMine and "|PLAYER" or ""
+    local groups = {}
+    if db.showDebuffs then groups.debuffs = "HARMFUL" .. suffix end
+    if db.showBuffs then groups.buffs = "HELPFUL" .. suffix end
+    return groups
+end
+
+function Addon:ConfigureAuraContainer(container)
+    local db = self.db.profile.auras
+    local desired = DesiredAuraGroups(db)
+    local filters = BuildCandidateFilters(db)
+    local maxShow = math.min(db.maxAuras or 5, MAX_AURA_ICONS)
+
+    container._groups = container._groups or {}
+
+    for key, filterString in pairs(desired) do
+        if container._groups[key] then
+            container:SetAuraGroupFilterString(key, filterString)
+            container:SetAuraGroupCandidateFilters(key, filters)
+            container:SetAuraGroupMaxFrameCount(key, maxShow)
+        else
+            container:AddAuraGroup(key, filterString, {
+                maxFrameCount = maxShow,
+                candidateFilters = filters,
+                initializeFrame = InitializeAuraButton,
+            })
+            container._groups[key] = true
+        end
+        -- Best-effort: the layout table keys churned during the 12.1 PTR
+        pcall(container.SetAuraGroupLayout, container, key, {
+            elementSpacing = db.iconSpacing or 2,
+        })
+    end
+
+    -- Groups cannot be removed once added; zero frames is the off switch
+    for key in pairs(container._groups) do
+        if not desired[key] then
+            container:SetAuraGroupMaxFrameCount(key, 0)
+        end
+    end
+end
+
+-- Called from RefreshAllPlates whenever settings may have changed
+function Addon:AuraConfigChanged()
+    if not HAS_AURA_CONTAINERS then return end
+    auraConfigEpoch = auraConfigEpoch + 1
+    self:RestyleAuraButtons()
+end
+
+----------------------------------------------------------------------
+-- Attach a container to a nameplate custom frame
+----------------------------------------------------------------------
+local function AttachAuraContainer(frame)
+    local container = AcquireAuraContainer()
+    if not container then
+        frame.auraContainerPending = true
+        return nil
+    end
+    frame.auraContainerPending = nil
+    container:SetParent(frame.auraFrame)
+    container:ClearAllPoints()
+    container:SetPoint("CENTER", frame.auraFrame, "CENTER", 0, 0)
+    container:Show()
+    frame.auraContainer = container
+    return container
+end
 
 ----------------------------------------------------------------------
 -- Create Aura Container
@@ -18,18 +225,94 @@ function Addon:CreateAuraFrame(frame)
     auraFrame:SetSize(db.healthbar.width or 120, db.auras.iconSize or 20)
     -- Initial position set by LayoutElements() in Core.lua
     auraFrame:SetFrameLevel(frame.container:GetFrameLevel() + 5)
+    frame.auraFrame = auraFrame
 
-    -- Pre-create icon pool
+    if HAS_AURA_CONTAINERS then
+        -- May defer to combat end when the pool is dry
+        AttachAuraContainer(frame)
+        return
+    end
+
+    -- Legacy: pre-create icon pool
     auraFrame.icons = {}
     for i = 1, MAX_AURA_ICONS do
         auraFrame.icons[i] = self:CreateAuraIcon(auraFrame, i)
     end
-
-    frame.auraFrame = auraFrame
 end
 
 ----------------------------------------------------------------------
--- Create Individual Aura Icon
+-- Update Auras (12.1 container path)
+----------------------------------------------------------------------
+function Addon:UpdateAurasContainer(frame, unitId)
+    local db = self.db.profile.auras
+    local container = frame.auraContainer
+    if not container then
+        container = AttachAuraContainer(frame)
+        if not container then return end -- attached after combat instead
+    end
+
+    if not db.enabled then
+        container:SetEnabled(false)
+        return
+    end
+
+    if container._configEpoch ~= auraConfigEpoch then
+        if InCombatLockdown() or AurasAreSecret() then
+            container._configDirty = true
+        else
+            self:ConfigureAuraContainer(container)
+            container._configEpoch = auraConfigEpoch
+            container._configDirty = nil
+        end
+    end
+
+    if container._unit ~= unitId then
+        container:SetUnit(unitId)
+        container._unit = unitId
+    end
+    container:SetEnabled(true)
+end
+
+-- Called when a nameplate frame is released: the same unit token can come
+-- back holding a different unit, so force the next UpdateAuras to SetUnit.
+function Addon:ResetAuraUnit(frame)
+    if frame and frame.auraContainer then
+        frame.auraContainer._unit = nil
+        frame.auraContainer:SetEnabled(false)
+    end
+end
+
+-- Called from Core's OnCombatEnd: refill the pool, attach containers to
+-- plates that appeared mid-combat, and apply deferred config changes.
+function Addon:OnAuraCombatEnd()
+    if not HAS_AURA_CONTAINERS then return end
+    self:PreallocateAuraContainers()
+
+    local retry = false
+    for _, frame in pairs(TPR.ActivePlates) do
+        if frame.unitId and (frame.auraContainerPending
+            or (frame.auraContainer and frame.auraContainer._configDirty)) then
+            if AurasAreSecret() then
+                retry = true
+            else
+                self:UpdateAuras(frame, frame.unitId)
+            end
+        end
+    end
+    self:RestyleAuraButtons()
+
+    -- Aura secrecy can outlast combat briefly; try again shortly
+    if retry then
+        C_Timer.After(2, function()
+            if not InCombatLockdown() then
+                Addon:OnAuraCombatEnd()
+            end
+        end)
+    end
+end
+
+----------------------------------------------------------------------
+-- Create Individual Aura Icon (legacy pre-12.1 path)
 ----------------------------------------------------------------------
 function Addon:CreateAuraIcon(parent, index)
     local db = self.db.profile
@@ -75,13 +358,15 @@ function Addon:CreateAuraIcon(parent, index)
 end
 
 ----------------------------------------------------------------------
--- Update Auras for a Unit (Midnight 12.0 compatible)
--- In 12.0, aura data fields may be secret values. We use
--- GetUnitAuraInstanceIDs() for enumeration and pass secret
--- values directly to widget APIs.
+-- Update Auras for a Unit
+-- 12.1+: engine-driven AuraContainer. Pre-12.1: manual scan.
 ----------------------------------------------------------------------
 function Addon:UpdateAuras(frame, unitId)
     if not frame or not frame.auraFrame or not unitId then return end
+
+    if HAS_AURA_CONTAINERS then
+        return self:UpdateAurasContainer(frame, unitId)
+    end
 
     local db = self.db.profile
     if not db.auras.enabled then
@@ -134,7 +419,7 @@ function Addon:UpdateAuras(frame, unitId)
 end
 
 ----------------------------------------------------------------------
--- Collect Auras (Midnight 12.0 compatible)
+-- Collect Auras (legacy pre-12.1 path)
 -- Uses GetUnitAuraInstanceIDs() if available, falls back to
 -- GetAuraDataBySlot or ForEachAura.
 ----------------------------------------------------------------------
@@ -221,7 +506,7 @@ function Addon:CollectAuras(unitId, filter, auras, db)
 end
 
 ----------------------------------------------------------------------
--- Apply Aura Data to Icon Frame (Midnight 12.0 compatible)
+-- Apply Aura Data to Icon Frame (legacy pre-12.1 path)
 -- Secret values are passed directly to widget APIs (SetTexture,
 -- SetText, SetCooldown) which accept them.
 ----------------------------------------------------------------------

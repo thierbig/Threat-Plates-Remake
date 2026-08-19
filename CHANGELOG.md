@@ -1,5 +1,29 @@
 # Changelog
 
+## v1.1.0
+
+- Patch 12.1 (Curse of Ula'tek) compatibility — Interface bumped to 120100
+- Auras: rebuilt on the new AuraContainer/AuraButton API. In 12.1 the aura-scanning
+  functions the addon used (GetUnitAuraInstanceIDs, GetAuraDataByAuraInstanceID,
+  GetAuraDataBySlot, GetAuraDuration) throw errors whenever auras are secret
+  (combat, dungeons, raids, PvP), so the game engine now fills and updates the
+  aura icons; the addon styles them (size, border, font, stacks, duration text,
+  cooldown swipe). Whitelist/blacklist filtering maps to the new spell-ID
+  candidate filters; name-based entries are ignored (12.1 filters accept IDs only)
+- Auras: containers can't be created during combat — a pool is pre-allocated at
+  login and refilled after combat; plates that spawn mid-combat with a dry pool
+  get their auras attached when combat ends
+- Auras: aura settings changed during combat now apply automatically when combat
+  ends (12.1 blocks reconfiguring aura displays while auras are secret)
+- Pre-12.1 clients automatically fall back to the old aura-scanning path
+- Fix: removed writes to the "nameplateShowFriends" CVar (deleted from the game
+  in 12.0.5) and dead C_NamePlateManager.SetShowFriendly* calls (never shipped);
+  "Show Friendly Nameplates" continues to work via nameplateShowFriendlyPlayers
+  and nameplateShowFriendlyNpcs
+- Verified against 12.1: cast bars (duration objects), health bars, threat,
+  combo points, quest icons, and the PvP cooldown tracker use APIs unchanged in
+  12.1 and need no migration
+
 ## v1.0.11
 
 - Fix: Threat module secret value comparisons now fully pcall-wrapped (fixes taint errors in instanced combat)
