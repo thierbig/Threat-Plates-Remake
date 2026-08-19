@@ -144,6 +144,13 @@ function Addon:OnNamePlateCreated(_, plate)
 end
 
 function Addon:OnNamePlateUnitAdded(_, unitId, _isRetry)
+    -- Retry paths (UNIT_FACTION fallback) can feed any unit token here, but
+    -- only nameplate tokens can resolve to a plate — and since 12.1,
+    -- GetNamePlateForUnit hard-errors on boss<n> tokens instead of
+    -- returning nil. A unit that has a plate also fires unit events with
+    -- its nameplateN token, so filtering loses nothing.
+    if not unitId or not string.find(string.lower(unitId), "^nameplate%d") then return end
+
     local plate = GetNamePlateForUnit(unitId)
     if not plate then
         -- Plate frame may not be registered on the same tick (faction change, spawn after interaction).
